@@ -241,6 +241,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private static final int KEY_MASK_CAMERA = 0x20;
     private static final int KEY_MASK_VOLUME = 0x40;
 
+    // Meizu MX circle: Side of the circle in current rotation.
+    private static final int MX_CIRCLE_TOP = Surface.ROTATION_0;
+    private static final int MX_CIRCLE_RIGHT = Surface.ROTATION_90;
+    private static final int MX_CIRCLE_BOTTOM = Surface.ROTATION_180;
+    private static final int MX_CIRCLE_LEFT = Surface.ROTATION_270;
+
 
     /**
      * These are the system UI flags that, when changing, can cause the layout
@@ -755,6 +761,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private boolean mTopWindowIsKeyguard;
     private CMHardwareManager mCMHardware;
     private boolean mShowKeyguardOnLeftSwipe;
+
+    // Meizu MX circle
+    boolean mShouldExhibitMxCircleBehavior = true;  // TODO
+    int mMxCircleDisplaySide;
+    boolean mHomeMxSwingUpPending;
+    int mHomeMxSwingUpTimeout = 200;  // TODO
 
     private class PolicyHandler extends Handler {
         @Override
@@ -1440,10 +1452,41 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     boolean isUserSetupComplete() {
-        return Settings.Secure.getIntForUser(mContext.getContentResolver(),
-                Settings.Secure.USER_SETUP_COMPLETE, 0, UserHandle.USER_CURRENT) != 0;
+        return CMSettings.Secure.getIntForUser(mContext.getContentResolver(),
+                CMSettings.Secure.CM_SETUP_WIZARD_COMPLETED, 0, UserHandle.USER_CURRENT) != 0;
     }
 
+    private boolean handleHomeMxSwingUp() {
+        if (mShouldExhibitMxCircleBehavior) {
+            if (mHomeMxSwingUpPending) {
+                Slog.v(TAG, "MX circle: home swipe detected!");
+                mHomeMxSwingUpPending = false;
+
+                // also clear double-tap handler
+                mHomeDoubleTapPending = false;
+                mHandler.removeCallbacks(mHomeDoubleTapTimeoutRunnable);
+
+                handleShortPressOnHome();
+            } else {
+                Slog.v(TAG, "MX circle: app switch swipe detected!");
+                toggleRecentApps();
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private void handleShortPressOnHomeAsBack() {
+        // On Flyme 5.x, short press on Home is treated exactly like a Back.
+        // TODO: allow Flyme 4.x-like behavior
+        triggerVirtualKeypress(KeyEvent.KEYCODE_BACK);
+    }
+
+    // Meizu MX circle: Actually this is the swing-up behavior of MX circle.
+    // But in case someone mods this via Xposed or something like that,
+    // we have to preserve its semantics.
     private void handleShortPressOnHome() {
         // Turn on the connected TV and switch HDMI input if we're a HDMI playback device.
         getHdmiControl().turnOnTv();
@@ -1555,7 +1598,35 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         public void run() {
             if (mHomeDoubleTapPending) {
                 mHomeDoubleTapPending = false;
+
+                if (mShouldExhibitMxCircleBehavior) {
+                    // also clear MX swing up handler
+                    mHomeMxSwingUpPending = false;
+                    mHandler.removeCallbacks(mHomeMxSwingUpTimeoutRunnable);
+
+                    // invoke the back key instead
+                    // TODO: allow configuration
+                    handleShortPressOnHomeAsBack();
+                    return;
+                }
+
                 handleShortPressOnHome();
+            }
+        }
+    };
+
+    private final Runnable mHomeMxSwingUpTimeoutRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (mShouldExhibitMxCircleBehavior && mHomeMxSwingUpPending) {
+                mHomeMxSwingUpPending = false;
+
+                // also clear double-tap handler
+                mHomeDoubleTapPending = false;
+                mHandler.removeCallbacks(mHomeDoubleTapTimeoutRunnable);
+
+                // TODO: allow configuration
+                handleShortPressOnHomeAsBack();
             }
         }
     };
@@ -1617,7 +1688,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         mWakeGestureListener = new MyWakeGestureListener(mContext, mHandler);
         mOrientationListener = new MyOrientationListener(mContext, mHandler);
         try {
-            mOrientationListener.setCurrentRotation(windowManager.getRotation());
+            final int rotation = windowManager.getRotation();
+            mOrientationListener.setCurrentRotation(rotation);
+            setMxCircleDisplaySideFromRotation(rotation);
         } catch (RemoteException ex) { }
         mSettingsObserver = new SettingsObserver(mHandler);
         mShortcutManager = new ShortcutManager(context);
@@ -1741,18 +1814,39 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 new SystemGesturesPointerEventListener.Callbacks() {
                     @Override
                     public void onSwipeFromTop() {
+                        if (mShouldExhibitMxCircleBehavior &&
+                                mMxCircleDisplaySide == MX_CIRCLE_TOP) {
+                            if (handleHomeMxSwingUp()) {
+                                return;
+                            }
+                        }
+
                         if (mStatusBar != null) {
                             requestTransientBars(mStatusBar);
                         }
                     }
                     @Override
                     public void onSwipeFromBottom() {
+                        if (mShouldExhibitMxCircleBehavior &&
+                                mMxCircleDisplaySide == MX_CIRCLE_BOTTOM) {
+                            if (handleHomeMxSwingUp()) {
+                                return;
+                            }
+                        }
+
                         if (mNavigationBar != null && mNavigationBarOnBottom) {
                             requestTransientBars(mNavigationBar);
                         }
                     }
                     @Override
                     public void onSwipeFromRight() {
+                        if (mShouldExhibitMxCircleBehavior &&
+                                mMxCircleDisplaySide == MX_CIRCLE_RIGHT) {
+                            if (handleHomeMxSwingUp()) {
+                                return;
+                            }
+                        }
+
                         if (mNavigationBar != null && !mNavigationBarOnBottom &&
                                 !mNavigationBarLeftInLandscape) {
                             requestTransientBars(mNavigationBar);
@@ -1760,6 +1854,13 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     }
                     @Override
                     public void onSwipeFromLeft() {
+                        if (mShouldExhibitMxCircleBehavior &&
+                                mMxCircleDisplaySide == MX_CIRCLE_LEFT) {
+                            if (handleHomeMxSwingUp()) {
+                                return;
+                            }
+                        }
+
                         if (mNavigationBar != null && !mNavigationBarOnBottom &&
                                 mNavigationBarLeftInLandscape) {
                             requestTransientBars(mNavigationBar);
@@ -2029,6 +2130,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         } else if ("0".equals(navBarOverride)) {
             mHasNavigationBar = true;
         }
+
+        // Meizu MX circle: exhibit MX circle behavior iff navigation bar is absent.
+        // TODO: allow this to be configurable
+        mShouldExhibitMxCircleBehavior = !mHasNavigationBar;
 
         // For demo purposes, allow the rotation of the HDMI display to be controlled.
         // By default, HDMI locks rotation to landscape.
@@ -2692,6 +2797,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         return mWinShowWhenLocked;
     }
 
+    @Override
+    public WindowState getWinKeyguardPanelLw() {
+        return mKeyguardPanel;
+    }
+
     /** {@inheritDoc} */
     @Override
     public View addStartingWindow(IBinder appToken, String packageName, int theme,
@@ -3206,6 +3316,15 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     return -1;
                 }
 
+                // Meizu MX circle: also delay in case MX behavior is wanted.
+                if (mShouldExhibitMxCircleBehavior) {
+                    mHandler.removeCallbacks(mHomeMxSwingUpTimeoutRunnable);
+                    mHomeMxSwingUpPending = true;
+                    mHandler.postDelayed(mHomeMxSwingUpTimeoutRunnable,
+                            mHomeMxSwingUpTimeout);
+                    return -1;
+                }
+
                 handleShortPressOnHome();
                 return -1;
             }
@@ -3236,6 +3355,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 if (mHomeDoubleTapPending) {
                     mHomeDoubleTapPending = false;
                     mHandler.removeCallbacks(mHomeDoubleTapTimeoutRunnable);
+                    // also clear MX swing up handler
+                    if (mShouldExhibitMxCircleBehavior) {
+                        mHomeMxSwingUpPending = false;
+                        mHandler.removeCallbacks(mHomeMxSwingUpTimeoutRunnable);
+                    }
                     performKeyAction(mDoubleTapOnHomeBehavior, event);
                     mHomeConsumed = mDoubleTapOnHomeBehavior != KEY_ACTION_SLEEP;
                 } else if (mLongPressOnHomeBehavior == KEY_ACTION_APP_SWITCH
@@ -6406,7 +6530,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     private void wakeUpFromPowerKey(long eventTime) {
-        wakeUp(eventTime, mAllowTheaterModeWakeFromPowerKey, "android.policy:POWER", true);
+        wakeUp(eventTime, mAllowTheaterModeWakeFromPowerKey, "android.policy:POWER");
     }
 
     private boolean wakeUp(long wakeTime, boolean wakeInTheaterMode, String reason) {
@@ -6877,6 +7001,31 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     @Override
     public void setRotationLw(int rotation) {
         mOrientationListener.setCurrentRotation(rotation);
+        setMxCircleDisplaySideFromRotation(rotation);
+    }
+
+    private void setMxCircleDisplaySideFromRotation(final int rotation) {
+        // Meizu MX circle: track current rotation for determining the circle's
+        // side (which is always at physical bottom for all devices with a MX
+        // circle design)
+        if (mShouldExhibitMxCircleBehavior) {
+            mMxCircleDisplaySide = mxCircleSideFromRotation(rotation);
+            Slog.d(TAG, "MX circle: rotation=" + rotation + " side=" + mMxCircleDisplaySide);
+        }
+    }
+
+    private int mxCircleSideFromRotation(final int rotation) {
+        if (rotation == mPortraitRotation) {
+            return MX_CIRCLE_BOTTOM;
+        } else if (rotation == mUpsideDownRotation) {
+            return MX_CIRCLE_TOP;
+        } else if (rotation == mLandscapeRotation) {
+            return MX_CIRCLE_RIGHT;
+        } else if (rotation == mSeascapeRotation) {
+            return MX_CIRCLE_LEFT;
+        }
+        // should never happen
+        return MX_CIRCLE_BOTTOM;
     }
 
     private boolean isLandscapeOrSeascape(int rotation) {
